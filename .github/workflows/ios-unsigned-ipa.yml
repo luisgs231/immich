@@ -1,0 +1,87 @@
+name: iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-26
+
+    steps:
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Mise
+        uses: jdx/mise-action@v4
+        with:
+          install: false
+          cache: true
+
+      - name: Install toolchain
+        run: |
+          mise trust --all
+          mise install
+          mise -C mobile install
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: ./mobile/ios
+
+      - name: Install dependencies
+        run: mise //mobile:install:ci
+
+      - name: Perform codegen
+        run: mise //mobile:codegen
+
+      - name: Build iOS without code signing
+        working-directory: ./mobile
+        run: mise exec -- flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        working-directory: ./mobile/build/ios/iphoneos
+        run: |
+          app=$(find . -maxdepth 1 -name '*.app' -print -quit)
+          if [ -z "$app" ]; then
+            echo "no .app bundle in $(pwd)" >&2
+            ls -la >&2
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$app" Payload/
+          zip -qry "$GITHUB_WORKSPACE/immich.ipa" Payload
+
+      - name: Read app version
+        id: version
+        working-directory: ./mobile
+        run: |
+          version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: immich-ipa
+          path: immich.ipa
+          if-no-files-found: error
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          files: immich.ipa
+          fail_on_unmatched_files: true
